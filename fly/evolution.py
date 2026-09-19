@@ -4,9 +4,10 @@ Die Zucht: Auslese, Kreuzung, Mutation.
 Ablauf pro Generation (= ein Kalenderquartal):
   1. LEBEN     Alle Fliegen erleben das neue Quartal, handeln und lernen.
                Das ist echte Vorhersage: entschieden wird vor dem Lernen.
-  2. PRÜFEN    Dazu zwei zufällige FRÜHERE Quartale, ohne Lernen: Hält das
-               Gelernte auch dort? Es zählt das SCHLECHTESTE der drei
-               Ergebnisse — wer irgendwo durchfällt, stirbt.
+  2. PRÜFEN    Dazu zufällige FRÜHERE Quartale, ohne Lernen: Hält das
+               Gelernte auch dort? Wie daraus die Fitness wird, entscheidet
+               der Modus (siehe score()): schlechteste Prüfung, alle Tage
+               zusammen, oder alle Tage gegen Buy & Hold.
   3. AUSLESE   Die besten `survivors` überleben mit ihrem Gedächtnis, der
                Rest wird gelöscht.
   4. NACHWUCHS Je zwei Überlebende zeugen ein Kind: Jedes Gen und jedes
@@ -23,16 +24,20 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from fly.population import Population, World, live, pnl, sharpe, vote
+from fly.population import Population, World, live, pnl, vote
 
 # Name: (untere Grenze, obere Grenze, logarithmisch?, Startbereich)
 GENES: dict[str, tuple[float, float, bool, tuple[float, float]]] = {
     "lr":            (0.005, 0.5,  True,  (0.01, 0.2)),    # wie stark ein Dopamin-Stoß wirkt
-    "forget":        (1e-4,  0.05, True,  (5e-4, 1e-2)),   # wie schnell Erinnerungen verblassen
+    # Diagnose: langsames Vergessen (≈1e-4) riecht deutlich mehr als schnelles (≈3e-3).
+    "forget":        (1e-5,  1e-2, True,  (5e-5, 1e-3)),   # wie schnell Erinnerungen verblassen
     "loss_aversion": (1.0,   4.0,  False, (1.0, 3.0)),     # wie viel mehr Verlust schmerzt
     "miss_weight":   (0.0,   1.0,  False, (0.0, 0.4)),     # wie laut Verpasstes zählt ("leise")
-    "thr_long":      (0.0,   0.5,  False, (0.0, 0.2)),     # Mut für Long
-    "thr_short":     (0.0,   0.7,  False, (0.1, 0.5)),     # Mut für Short — gegen den Wind, also höher
+    # Schwellen dürfen NEGATIV sein: Verlustangst drückt alle Werte ins Minus
+    # (Median ≈ -0.08), obwohl die Rangfolge der Tage stimmt. Nur eine Schwelle,
+    # die mit dem Charakter mitwandert, lässt eine vorsichtige Fliege überhaupt handeln.
+    "thr_long":      (-0.4,  0.4,  False, (-0.15, 0.1)),   # Mut für Long
+    "thr_short":     (-0.4,  0.6,  False, (0.0, 0.3)),     # Mut für Short — gegen den Wind, also höher
     "horizon":       (1,     10,   False, (1, 10)),        # nach wie vielen Tagen abgerechnet wird
     "mut_scale":     (0.01,  0.5,  True,  (0.05, 0.2)),    # wie wild die Kinder mutieren
 }
@@ -46,7 +51,37 @@ class Config:
     exams: int = 2
     quorum: int = 6                 # von 10 Schwarm-Fliegen
     control: str = "none"           # none | random-selection | shuffled-dopamine
+    fitness: str = "excess"         # worst | pooled | excess, siehe score() — excess gewann v2
     seed: int = 1
+
+
+# Rauschboden für die Fitness: ~3 % Jahresschwankung. Ohne ihn hätte eine
+# Fliege, die an drei Tagen im Quartal zufällig richtig liegt, einen riesigen
+# Sharpe — die Auslese belohnte Glück statt Können.
+NOISE_FLOOR = 0.002
+
+
+def score(daily: list[np.ndarray], bench: list[np.ndarray], mode: str) -> np.ndarray:
+    """
+    Fitness aus dem Leben (Index 0) und den Prüfungen. daily[i]: (P, n_i).
+
+    worst   schlechtester Sharpe der einzelnen Prüfungen ("wer irgendwo
+            durchfällt, stirbt") — v1
+    pooled  ein Sharpe über alle Prüfungstage zusammen: mehr Tage, weniger Glück
+    excess  wie pooled, aber gegen Buy & Hold: nur wer den Markt schlägt, lebt.
+            Nichtstun ist hier nicht mehr automatisch sicher.
+    """
+    def floored_sharpe(x):
+        return x.mean(axis=-1) / (x.std(axis=-1) + NOISE_FLOOR) * np.sqrt(252)
+
+    if mode == "worst":
+        return np.min(np.stack([floored_sharpe(d) for d in daily]), axis=0)
+    pooled = np.concatenate(daily, axis=1)
+    if mode == "pooled":
+        return floored_sharpe(pooled)
+    if mode == "excess":
+        return floored_sharpe(pooled - np.concatenate(bench)[None, :])
+    raise ValueError(f"unbekannter Fitness-Modus {mode!r}")
 
 
 def hatch(n: int, n_kc: int, rng: np.random.Generator, first_id: int = 0) -> Population:
@@ -128,7 +163,8 @@ def evolve(world: World, cfg: Config, n_kc: int, max_generations: int | None = N
     rows, wf_pnl, wf_pos, wf_days = [], [], [], []
     for g, (t0, t1) in enumerate(quarters):
         positions = live(pop, learn_world, t0, t1, learn=True)
-        live_score = sharpe(pnl(positions, world, t0, t1))
+        daily = [pnl(positions, world, t0, t1)]
+        bench = [np.nan_to_num(world.ret1[t0:t1])]
 
         # Walk-forward: Die Überlebenden der VORIGEN Generation stehen vorn in
         # der Population. Ihr Abstimmungsergebnis in diesem Quartal ist eine
@@ -139,13 +175,13 @@ def evolve(world: World, cfg: Config, n_kc: int, max_generations: int | None = N
         wf_pnl.append(pnl(swarm_pos[None, :], world, t0, t1)[0])
         wf_days.append(world.days[t0:t1])
 
-        scores = [live_score]
         if g > 0:
             for e in rng.choice(g, size=min(cfg.exams, g), replace=False):
                 e0, e1 = quarters[e]
                 exam_pos = live(pop, world, e0, e1, learn=False)
-                scores.append(sharpe(pnl(exam_pos, world, e0, e1)))
-        fitness = np.min(np.stack(scores), axis=0)
+                daily.append(pnl(exam_pos, world, e0, e1))
+                bench.append(np.nan_to_num(world.ret1[e0:e1]))
+        fitness = score(daily, bench, cfg.fitness)
 
         if cfg.control == "random-selection":
             order = rng.permutation(pop.size)

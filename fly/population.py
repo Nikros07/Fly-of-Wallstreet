@@ -13,9 +13,10 @@ Lernen wie in der echten Fliege, nur durch ABSCHWÄCHEN:
   * alle Synapsen erholen sich langsam Richtung 1 (Vergessen)
 Gewichte bleiben dadurch immer in [0, 1]; nichts kann explodieren.
 
-NO TRADE ist der Ruhezustand: gehandelt wird nur, wenn ein Wert die
-Handelsschwelle (ein Gen) übersteigt. Eine frisch geschlüpfte Fliege hat
-überall GO = NOGO = 1, also Wert 0, und handelt nicht.
+NO TRADE ist der Ruhezustand: gehandelt wird nur, wenn das Muster vertraut
+ist (Neuheitsdetektor) UND ein Wert die Handelsschwelle (ein Gen) übersteigt.
+Eine frisch geschlüpfte Fliege hat überall GO = NOGO = 1 — nichts ist ihr
+vertraut, sie handelt nicht.
 
 Zeitdisziplin: Am Tag t entscheidet die Fliege ZUERST und lernt DANACH — und
 zwar nur aus einem Ergebnis, das zum Schluss von Tag t vollständig bekannt ist
@@ -38,6 +39,7 @@ LONG, SHORT = 0, 1
 MAX_HORIZON = 10
 COST = 0.0005            # 5 Basispunkte je Einheit Positionswechsel (Gebühr + Spread)
 BORROW = 0.01 / 252      # Leihgebühr pro Short-Tag (1 % p.a.)
+NOVELTY = 0.05           # unter so viel Erfahrung gilt ein Muster als unbekannt
 
 
 @dataclass(frozen=True)
@@ -102,27 +104,51 @@ class Population:
                           np.concatenate([a.go, b.go]), np.concatenate([a.nogo, b.nogo]),
                           np.concatenate([a.ids, b.ids]), a.parents + b.parents)
 
+    @classmethod
+    def load(cls, path) -> "Population":
+        """Einen gespeicherten Schwarm (swarm.npz aus results/) wieder zum Leben erwecken."""
+        z = np.load(path)
+        genes = {k[5:]: z[k] for k in z.files if k.startswith("gene_")}
+        return cls(genes, z["go"], z["nogo"], z["ids"], [None] * len(z["ids"]))
+
     def values(self, active: np.ndarray) -> np.ndarray:
         """Wert von Long und Short für ein Feuermuster, Form (P, 2)."""
         return (self.go[:, :, active] - self.nogo[:, :, active]).mean(axis=2)
 
+    def experience(self, active: np.ndarray) -> np.ndarray:
+        """
+        Wie vertraut ist dieses Muster? 0 = nie Dopamin dafür bekommen
+        (alle Synapsen noch auf 1), wächst mit jedem Lernschritt. Form (P,).
+        """
+        return (2.0 - self.go[:, :, active] - self.nogo[:, :, active]).mean(axis=(1, 2))
+
     def decide(self, active: np.ndarray) -> np.ndarray:
         v = self.values(active)
         vl, vs = v[:, LONG], v[:, SHORT]
-        go_long = (vl > self.genes["thr_long"]) & (vl >= vs)
-        go_short = (vs > self.genes["thr_short"]) & (vs > vl)
+        # Neuheitsdetektor: Unbekanntes wird nicht gehandelt, egal wie mutig
+        # die Schwelle ist. Das hält NO TRADE als Ruhezustand, obwohl
+        # Schwellen negativ sein dürfen.
+        familiar = self.experience(active) > NOVELTY
+        go_long = familiar & (vl > self.genes["thr_long"]) & (vl >= vs)
+        go_short = familiar & (vs > self.genes["thr_short"]) & (vs > vl)
         return go_long.astype(np.int8) - go_short.astype(np.int8)
 
 
-def live(pop: Population, world: World, t0: int, t1: int, learn: bool = True) -> np.ndarray:
+def live(pop: Population, world: World, t0: int, t1: int, learn: bool = True,
+         values_out: np.ndarray | None = None) -> np.ndarray:
     """
     Lässt alle Fliegen die Tage [t0, t1) erleben. Rückgabe: Positionen (P, n)
     mit +1 Long, 0 NO TRADE, -1 Short. Mit learn=False ist es eine Prüfung:
     Die Fliege handelt nur mit dem, was sie schon weiß.
+
+    `values_out` (P, n, 2) nimmt auf Wunsch die Werte auf, auf denen jede
+    Entscheidung beruhte — für die Diagnose, ob die Fliege etwas "riecht".
     """
     P, n = pop.size, t1 - t0
     positions = np.zeros((P, n), dtype=np.int8)
     for t in range(t0, t1):
+        if values_out is not None:
+            values_out[:, t - t0] = pop.values(world.kc[t])
         positions[:, t - t0] = pop.decide(world.kc[t])
         if learn:
             _learn(pop, world, t, t0, positions)

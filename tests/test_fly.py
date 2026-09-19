@@ -106,6 +106,21 @@ def test_fresh_fly_does_not_trade():
     assert (pop.decide(np.arange(15)) == 0).all()
 
 
+def test_unfamiliar_pattern_is_not_traded_even_by_a_bold_fly():
+    """Negative Schwelle = sehr mutig. Trotzdem: Unbekanntes wird nicht gehandelt."""
+    world = fake_world()
+    pop = hatch(1, 300, np.random.default_rng(0))
+    pop.genes.update(thr_long=np.array([-0.4]), thr_short=np.array([-0.4]),
+                     horizon=np.array([1.0]), lr=np.array([0.3]), miss_weight=np.array([1.0]))
+    assert pop.decide(np.arange(15))[0] == 0
+    live(pop, world, 0, 60)                                  # lernt Muster aus 60 Tagen
+    seen = world.kc[30]
+    never_seen = np.setdiff1d(np.arange(300), world.kc[:60].ravel())
+    assert pop.decide(seen)[0] != 0
+    if len(never_seen) >= 5:
+        assert pop.decide(never_seen[:15])[0] == 0
+
+
 def test_reward_raises_and_punishment_lowers_the_value():
     world = fake_world()
     for sign in (+1, -1):
@@ -143,6 +158,19 @@ def test_child_inherits_each_memory_whole_from_one_parent():
         assert (from_mother ^ from_father).all()
         np.testing.assert_array_equal(kids.nogo[i][:, from_mother], np.float32(0.3))
         np.testing.assert_array_equal(kids.nogo[i][:, from_father], np.float32(0.9))
+
+
+def test_saved_swarm_comes_back_identical(tmp_path):
+    from fly.population import Population
+    rng = np.random.default_rng(0)
+    pop = hatch(3, 50, rng)
+    pop.go[:] = rng.random(pop.go.shape)
+    np.savez_compressed(tmp_path / "swarm.npz", go=pop.go, nogo=pop.nogo, ids=pop.ids,
+                        **{f"gene_{k}": v for k, v in pop.genes.items()})
+    back = Population.load(tmp_path / "swarm.npz")
+    np.testing.assert_array_equal(back.go, pop.go)
+    assert back.genes.keys() == pop.genes.keys()
+    np.testing.assert_array_equal(back.decide(np.arange(10)), pop.decide(np.arange(10)))
 
 
 def test_mutation_keeps_genes_in_bounds():

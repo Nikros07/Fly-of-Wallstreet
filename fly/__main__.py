@@ -2,6 +2,7 @@
 Kommandozeile.
 
     python -m fly evolve                    eine Zucht, Walk-Forward-Ergebnis
+    python -m fly diagnose                  riecht eine einzelne Fliege überhaupt etwas?
     python -m fly lab --seeds 1 2 3         Zucht + beide Kontrollversuche, mehrere Seeds
     python -m fly evolve --friedhof         zusätzlich der Friedhofs-Test (sparsam benutzen!)
 
@@ -20,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from fly.data import Market, load_closes
-from fly.evolution import Config, Result, evolve
+from fly.evolution import Config, Result, evolve, hatch
 from fly.population import World, live, pnl, vote
 from fly.report import stats, table
 from fly.skull import Skull
@@ -77,9 +78,15 @@ def friedhof(market, skull, res: Result) -> pd.DataFrame:
 
 def save(res: Result, world: World, extra: str = "") -> Path:
     cfg = res.config
-    out = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}_{cfg.control}_s{cfg.seed}"
+    out = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}_{cfg.fitness}_{cfg.control}_s{cfg.seed}"
     out.mkdir(parents=True, exist_ok=True)
     res.generations.to_csv(out / "generations.csv", index=False)
+    sv = res.survivors
+    pd.DataFrame({"id": sv.ids, "eltern": [p if p else "Urfliege" for p in sv.parents],
+                  **{k: np.round(v, 5) for k, v in sv.genes.items()}}).to_csv(
+        out / "survivors.csv", index=False)
+    np.savez_compressed(out / "swarm.npz", go=sv.go, nogo=sv.nogo, ids=sv.ids,
+                        **{f"gene_{k}": v for k, v in sv.genes.items()})
     pd.DataFrame({"swarm": res.walk_forward, "position": res.walk_forward_positions}) \
         .to_csv(out / "walk_forward.csv")
     rows = {
@@ -87,21 +94,29 @@ def save(res: Result, world: World, extra: str = "") -> Path:
         "SPY Buy & Hold": stats(buy_and_hold(world, res.walk_forward.index)),
     }
     (out / "report.md").write_text(
-        f"# Zucht {cfg.control}, Seed {cfg.seed}\n\n{table(rows)}\n{extra}", encoding="utf-8")
+        f"# Zucht {cfg.fitness} / {cfg.control}, Seed {cfg.seed}\n\n{table(rows)}\n{extra}", encoding="utf-8")
     return out
 
 
+def make_config(args, **over) -> Config:
+    base = dict(population=args.population, survivors=args.survivors, quorum=args.quorum,
+                exams=args.exams)
+    base.update(over)
+    return Config(**base)
+
+
 def cmd_evolve(args, market, skull):
-    cfg = Config(population=args.population, survivors=args.survivors,
-                 quorum=args.quorum, control=args.control, seed=args.seed)
-    print(f"Zucht: {cfg.population} Fliegen, {cfg.survivors} überleben, "
+    cfg = make_config(args, control=args.control, fitness=args.fitness, seed=args.seed)
+    print(f"Zucht: {cfg.population} Fliegen, {cfg.survivors} überleben, Fitness={cfg.fitness}, "
           f"Kontrolle={cfg.control}, Seed={cfg.seed}")
     res, world = run_one(market, skull, cfg, args.generations, quiet=False)
     wf = res.walk_forward
     rows = {"Schwarm (walk-forward)": stats(wf, res.walk_forward_positions),
             "SPY Buy & Hold": stats(buy_and_hold(world, wf.index))}
-    print(f"\nWalk-forward {wf.index[0]:%Y-%m} bis {wf.index[-1]:%Y-%m} "
-          "(jedes Quartal vorhergesagt, bevor es ausgelesen wurde):\n")
+    print()
+    print(f"Walk-forward {wf.index[0]:%Y-%m} bis {wf.index[-1]:%Y-%m} "
+          "(jedes Quartal vorhergesagt, bevor es ausgelesen wurde):")
+    print()
     print(table(rows))
 
     extra = ""
@@ -110,27 +125,79 @@ def cmd_evolve(args, market, skull):
         rows_fh = {"Schwarm (Friedhof)": stats(fh["swarm"], fh["position"]),
                    "SPY Buy & Hold": stats(fh["SPY"])}
         extra = f"\n## Friedhof ab {CUTOFF}\n\n{table(rows_fh)}\n"
-        print(f"\nFRIEDHOF ab {CUTOFF} — nie von der Evolution gesehen:\n")
+        print()
+        print(f"FRIEDHOF ab {CUTOFF} — nie von der Evolution gesehen:")
+        print()
         print(table(rows_fh))
-    print(f"\nGespeichert: {save(res, world, extra)}")
+    print()
+    print(f"Gespeichert: {save(res, world, extra)}")
 
 
 def cmd_lab(args, market, skull):
-    """Echte Zucht gegen beide Kontrollversuche. Nur wenn sie klar vorn liegt, lernt sie etwas."""
-    rows = {}
-    bench = None
-    for seed in args.seeds:
-        for control in ("none", "random-selection", "shuffled-dopamine"):
-            cfg = Config(population=args.population, survivors=args.survivors,
-                         quorum=args.quorum, control=control, seed=seed)
-            print(f"… {control}, Seed {seed}")
-            res, world = run_one(market, skull, cfg, args.generations, quiet=True)
-            save(res, world)
-            rows[f"{control} s{seed}"] = stats(res.walk_forward, res.walk_forward_positions)
-            bench = stats(buy_and_hold(world, res.walk_forward.index))
+    """
+    Echte Zucht gegen die Kontrollversuche, je Fitness-Modus und Seed.
+    Eine Variante lernt nur dann etwas, wenn sie ihre eigene Kontrolle über
+    ALLE Seeds hinweg schlägt — ein einzelner guter Seed ist Anekdote.
+    """
+    runs, bench = [], None
+    for fitness in args.fitness:
+        for control in args.controls:
+            for seed in args.seeds:
+                cfg = make_config(args, control=control, fitness=fitness, seed=seed)
+                print(f"… Fitness={fitness}, Kontrolle={control}, Seed {seed}", flush=True)
+                res, world = run_one(market, skull, cfg, args.generations, quiet=True)
+                save(res, world)
+                runs.append({"fitness": fitness, "control": control, "seed": seed,
+                             **stats(res.walk_forward, res.walk_forward_positions)})
+                bench = stats(buy_and_hold(world, res.walk_forward.index))
+
+    df = pd.DataFrame(runs)
+    metrics = [c for c in df.columns if c not in ("fitness", "control", "seed")]
+    rows = {f"{r['fitness']} / {r['control']} / s{r['seed']}": {k: r[k] for k in metrics}
+            for r in df.to_dict("records")}
     rows["SPY Buy & Hold"] = bench
-    print("\nWalk-forward, alle Läufe:\n")
+    print()
+    print("Walk-forward, alle Läufe:")
+    print()
     print(table(rows))
+
+    mean = df.groupby(["fitness", "control"], sort=False)[["p.a.", "Sharpe", "MaxDD", "investiert"]].mean()
+    summary = {f"{f} / {c}": r.to_dict() for (f, c), r in mean.iterrows()}
+    summary["SPY Buy & Hold"] = {k: bench[k] for k in ("p.a.", "Sharpe", "MaxDD")}
+    print()
+    print("Mittel über Seeds:")
+    print()
+    print(table(summary))
+    RESULTS.mkdir(exist_ok=True)
+    df.to_csv(RESULTS / f"lab_{time.strftime('%Y%m%d-%H%M%S')}.csv", index=False)
+
+
+def cmd_diagnose(args, market, skull):
+    """
+    Riecht eine einzelne Fliege überhaupt etwas? Ohne Evolution, über die
+    ganze Zeit vor dem Friedhof: Wie stark hängt ihr Long-Gefühl mit der
+    späteren Rendite zusammen (IC = Rangkorrelation), echt gegen gemischt?
+    Liegt "echt" nicht klar über "gemischt", kann keine Zucht der Welt helfen.
+    """
+    world = World.build(market.until(CUTOFF), skull)
+    T = len(world.days)
+    grid = [(lr, fg, h) for lr in (0.02, 0.1) for fg in (1e-4, 1e-3) for h in (1, 5, 10)]
+    warmup = 250
+    print(f"{'':10}{'lr':>6}{'forget':>8}{'h':>4}{'IC':>8}")
+    for name, w in (("echt", world),
+                    ("gemischt", world.with_shuffled_learning(np.random.default_rng(0)))):
+        pop = hatch(len(grid), skull.n_kc, np.random.default_rng(1))
+        pop.genes["lr"][:] = [g[0] for g in grid]
+        pop.genes["forget"][:] = [g[1] for g in grid]
+        pop.genes["horizon"][:] = [g[2] for g in grid]
+        pop.genes["miss_weight"][:] = 1.0
+        vals = np.zeros((pop.size, T, 2))
+        live(pop, w, 0, T, values_out=vals)
+        for i, (lr, fg, h) in enumerate(grid):
+            y = world.fwd[:, h]
+            ok = np.isfinite(y) & (np.arange(T) >= warmup)
+            ic = pd.Series(vals[i, ok, 0]).rank().corr(pd.Series(y[ok]).rank())
+            print(f"{name:10}{lr:>6}{fg:>8.0e}{h:>4}{ic:>+8.3f}")
 
 
 def main():
@@ -138,22 +205,28 @@ def main():
     p = argparse.ArgumentParser(prog="fly", description="Fly of Wallstreet — Fliegenzucht für SPY")
     p.add_argument("--refresh", action="store_true", help="Kursdaten neu laden")
     sub = p.add_subparsers(dest="cmd", required=True)
+    fitness_modes = ["worst", "pooled", "excess"]
+    controls = ["none", "random-selection", "shuffled-dopamine"]
     for name in ("evolve", "lab"):
         s = sub.add_parser(name)
         s.add_argument("--population", type=int, default=50)
         s.add_argument("--survivors", type=int, default=10)
         s.add_argument("--quorum", type=int, default=6)
+        s.add_argument("--exams", type=int, default=2, help="frühere Quartale als Prüfung")
         s.add_argument("--generations", type=int, default=None, help="nur die ersten N Quartale")
         if name == "evolve":
             s.add_argument("--seed", type=int, default=1)
-            s.add_argument("--control", default="none",
-                           choices=["none", "random-selection", "shuffled-dopamine"])
+            s.add_argument("--control", default="none", choices=controls)
+            s.add_argument("--fitness", default="excess", choices=fitness_modes)
             s.add_argument("--friedhof", action="store_true")
         else:
             s.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
+            s.add_argument("--fitness", nargs="+", default=["excess"], choices=fitness_modes)
+            s.add_argument("--controls", nargs="+", default=controls, choices=controls)
+    sub.add_parser("diagnose")
     args = p.parse_args()
     market, skull = build(args.refresh)
-    {"evolve": cmd_evolve, "lab": cmd_lab}[args.cmd](args, market, skull)
+    {"evolve": cmd_evolve, "lab": cmd_lab, "diagnose": cmd_diagnose}[args.cmd](args, market, skull)
 
 
 if __name__ == "__main__":

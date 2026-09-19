@@ -41,16 +41,29 @@ def raw_features(closes: pd.DataFrame) -> pd.DataFrame:
     return f
 
 
+# Merkmale, deren NIVEAU nur relativ Sinn ergibt: gemessen am Mittel des letzten
+# Jahres ("ist die Vola heute höher als normal?"). Alle anderen sind RICHTUNGEN,
+# deren Vorzeichen selbst die Information ist ("über oder unter dem 200er-Schnitt?").
+# Würde man die auch am Jahresmittel messen, hieße nach einem Jahr Aufwärtstrend
+# "knapp über dem Schnitt" plötzlich "unter normal" — die Fliege verlöre genau
+# den Trend, den sie riechen soll.
+LEVELS = ("vol_20", "vol_ratio", "vix_level")
+
+
 def channels(closes: pd.DataFrame) -> pd.DataFrame:
     """
     Merkmale als rollierende z-Werte, aufgeteilt in AN- und AUS-Kanal.
+    Niveaus: (x - Jahresmittel) / Jahresstreuung. Richtungen: x / typische
+    Größe (RMS) des letzten Jahres — Vorzeichen bleibt erhalten.
     Tage, an denen noch nicht genug Geschichte für ein "normal" vorliegt,
     werden entfernt statt geraten.
     """
     raw = raw_features(closes)
-    mean = raw.rolling(Z_WINDOW, min_periods=Z_WINDOW).mean()
-    std = raw.rolling(Z_WINDOW, min_periods=Z_WINDOW).std()
-    z = ((raw - mean) / std).clip(-Z_CLIP, Z_CLIP)
+    roll = raw.rolling(Z_WINDOW, min_periods=Z_WINDOW)
+    level = (raw - roll.mean()) / roll.std()
+    direction = raw / np.sqrt((raw ** 2).rolling(Z_WINDOW, min_periods=Z_WINDOW).mean())
+    z = pd.concat([level[c] if c in LEVELS else direction[c] for c in raw.columns],
+                  axis=1).clip(-Z_CLIP, Z_CLIP)
 
     on = z.clip(lower=0).add_suffix("+")
     off = (-z).clip(lower=0).add_suffix("-")
