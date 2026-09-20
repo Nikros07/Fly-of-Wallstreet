@@ -126,6 +126,56 @@ Was **nicht** hilft: die Bauweise des Schädels. 2000 vs. 5000 Kenyon-Zellen, 3�
 
 Was die Evolution **von selbst** gefunden hat: `miss_weight` sinkt auf 0,01–0,3 — Verpasstes soll tatsächlich nur leise wehtun.
 
+## Ergebnis v3 (2026-09-20) — neue Sinne helfen nicht, Zeitraum schlägt Sinne
+
+Erweiterung von `fly/senses.py`: Kreditaufschlag (HYG/LQD), Marktbreite
+(RSP/SPY) und zwei Fluchtwerte, Gold und lange Anleihen (je relative Stärke
+gegen SPY) — Momentum über mehrere Zeitskalen, im Stil der bestehenden
+Merkmale. Schalter `--senses v2|v3` (auch `FLY_SENSES`) wählt den
+Merkmalssatz; `fly/data.py` lädt die neuen ETFs nur für v3 nach, und weil
+HYG erst ab 2007-04 existiert, kürzt `channels()`s `dropna()` die nutzbare
+v3-Historie automatisch auf ~2009-04 (250 Tage Warmup für die längsten
+Merkmale + 252 Tage rollierendes Fenster).
+
+Weil dieser kürzere Zeitraum v3-Ergebnisse nicht mit dem v2-Ergebnis von
+1995–2024 oben vergleichbar macht, misst der Vergleich beide Sinnessätze auf
+demselben Fenster (`--since 2007-04-11`, nutzbar ab 2009-04 bis 2024-12).
+
+`python -m fly diagnose` (IC = Rangkorrelation Long-Gefühl↔Rendite, Mittel
+über 12 Parameterkombinationen, echt gegen gemischt):
+
+| | IC echt | IC gemischt | Differenz |
+|---|---|---|---|
+| v2-Sinne | +0,031 | +0,038 | −0,008 |
+| v3-Sinne | +0,038 | +0,051 | −0,013 |
+
+`python -m fly lab --seeds 1 2 3 4 5 --controls none shuffled-dopamine`,
+Walk-forward 2009-04 bis 2024-12, Fitness `excess`, Mittel über 5 Seeds:
+
+| | p.a. | Sharpe | MaxDD | investiert |
+|---|---|---|---|---|
+| v2-Sinne, echte Zucht | +8,3 % | 0,60 | 34,2 % | 69,3 % |
+| v2-Sinne, Kontrolle Zufallsdopamin | +11,5 % | 0,77 | 32,8 % | 88,2 % |
+| v3-Sinne, echte Zucht | +7,8 % | 0,58 | 30,8 % | 72,9 % |
+| v3-Sinne, Kontrolle Zufallsdopamin | +10,5 % | 0,71 | 33,8 % | 89,0 % |
+| SPY Buy & Hold (gleicher Zeitraum) | +15,3 % | 0,91 | 33,7 % | 100 % |
+
+- **Die neuen Sinne bringen nichts.** In der Diagnose liegt „echt" bei v3
+  nicht klarer über „gemischt" als bei v2 — der Abstand ist sogar etwas
+  negativer. In der Zucht liegen v3-Sinne bei beiden Kontrollen leicht unter
+  v2-Sinnen (Sharpe −0,02 bzw. −0,06). Bei 5 Seeds ist das im Rauschen, aber
+  jedenfalls kein Gewinn.
+- **Überraschender Nebenbefund:** Auf 2009–2024 schlägt die Kontrolle
+  Zufallsdopamin die echte Zucht deutlich — bei BEIDEN Sinnessätzen (v2 wie
+  v3). Das steht im Gegensatz zum vollen 1995–2024-Ergebnis oben, wo echte
+  Belohnungen die Kontrolle schlugen. Ohne den fairen Zeitraum-Vergleich hätte
+  man das v2-Vollhistorie-Ergebnis fälschlich gegen ein kürzeres
+  v3-Ergebnis gehalten und Unterschiede den Sinnen zugeschrieben, die in
+  Wirklichkeit am Zeitraum liegen.
+- Post-Finanzkrise-Bullenmarkt (2009–2024) scheint für „echtes Lernen aus
+  Dopamin" schwieriger zu sein als die volle Historie seit 1995. Der Friedhof
+  (ab 2025) bleibt unberührt.
+
 ## Ergebnis v1 (2026-09-19) — die Fliegen lernen noch nichts Echtes
 
 Walk-forward 1995–2024, 50 Fliegen, 3 Seeds (`python -m fly lab`):
@@ -158,10 +208,14 @@ python -m venv .venv
 .venv\Scripts\python -m fly evolve              # eine Zucht, Walk-forward-Ergebnis
 .venv\Scripts\python -m fly lab --seeds 1 2 3   # Zucht gegen beide Kontrollversuche
 .venv\Scripts\python -m fly evolve --friedhof   # + einmaliger Test auf 2025–heute
+.venv\Scripts\python -m fly --senses v3 diagnose            # neue Sinne (Kredit/Breite/Flucht)
+.venv\Scripts\python -m fly --senses v3 --since 2007-04-11 lab --seeds 1 2 3   # fairer Vergleich zu v2
 ```
 
 Kursdaten (SPY, VIX, 10-J-Zins ab 1993) lädt der erste Lauf von Yahoo und legt
-sie in `data/` ab. Jede Zucht speichert in `results/` ihren Verlauf, die
+sie in `data/` ab; mit `--senses v3` zusätzlich HYG, LQD, RSP, GLD, TLT (ab
+2007). `--since` schneidet von unten ab — für einen fairen Vergleich von v2-
+und v3-Sinnen auf demselben Zeitraum. Jede Zucht speichert in `results/` ihren Verlauf, die
 überlebenden Fliegen (`survivors.csv` mit Genen und Eltern) und den Schwarm samt
 Gedächtnis (`swarm.npz`, ladbar mit `Population.load`). Eine Zucht dauert ~20 s.
 
