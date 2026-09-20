@@ -1,0 +1,35 @@
+name: Tagessignal
+
+# Werktags 22:40 UTC — nach US-Börsenschluss (22:00 UTC im Sommer, 21:00 im Winter),
+# mit Puffer, bis Yahoo den Schlusskurs des Tages hat.
+on:
+  schedule:
+    - cron: "40 22 * * 1-5"
+  workflow_dispatch:        # Knopf zum Selbststarten im Actions-Tab
+
+permissions:
+  contents: write           # der Lauf schreibt Signal und Gedächtnis ins Repo zurück
+
+concurrency:
+  group: tagessignal        # nie zwei Läufe gleichzeitig am selben Gedächtnis
+  cancel-in-progress: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - run: python -m fly.daily
+      - name: Signal und Gedächtnis zurückschreiben
+        run: |
+          git config user.name "fly-of-wallstreet[bot]"
+          git config user.email "noreply@github.com"
+          git add swarm/
+          git diff --staged --quiet || git commit -m "Tagessignal $(date -u +%F)"
+          git push

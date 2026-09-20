@@ -165,6 +165,34 @@ sie in `data/` ab. Jede Zucht speichert in `results/` ihren Verlauf, die
 überlebenden Fliegen (`survivors.csv` mit Genen und Eltern) und den Schwarm samt
 Gedächtnis (`swarm.npz`, ladbar mit `Population.load`). Eine Zucht dauert ~20 s.
 
+## Täglich laufen lassen — kostenlos
+
+```bash
+python -m fly.daily --init results/<lauf>/swarm.npz   # einmalig: Schwarm einsetzen
+python -m fly.daily                                   # Kurse holen, weiterleben, abstimmen
+```
+
+`.github/workflows/daily.yml` erledigt das werktags um 22:40 UTC per **GitHub Actions**
+(kostenlos: öffentliche Repos unbegrenzt, private 2.000 Minuten/Monat; ein Lauf dauert Sekunden).
+Der Lauf schreibt seinen Zustand ins Repo zurück:
+
+| Datei | Inhalt |
+|---|---|
+| `swarm/current.npz` | Gedächtnis und Gene der 10 Schwarm-Fliegen |
+| `swarm/state.json` | bis zu welchem Handelstag sie gelebt haben |
+| `swarm/signals.csv` | jede Entscheidung mit Datum, Stimmen und Kurs |
+
+Das Signal steht damit **vor** dem nächsten Handelstag im Git-Verlauf und ist
+nachträglich nicht mehr schönzurechnen — das billigste ehrliche Paper-Trading, das es gibt.
+
+**Hier wird nichts gehandelt.** Der Lauf schreibt nur auf, was der Schwarm täte. Echtes
+Geld kommt frühestens in Frage, wenn eine Version den Walk-forward UND den Friedhof
+besteht — und dann über ein Broker-Paper-Konto (z. B. Alpaca, gratis) als Zwischenschritt.
+
+Alternativen zum Hosten: Oracle Cloud "Always Free" (echter Dauerserver, mehr Einrichtung),
+Railway ab 5 €/Monat. PythonAnywhere scheidet aus — die Gratis-Version lässt keine
+Yahoo-Abfragen zu.
+
 ## Projektaufbau
 
 ```
@@ -175,4 +203,5 @@ fly/dopamine.py    Belohnungssystem
 fly/population.py  lernende Ausgangsschicht, Leben, Schwarm-Abstimmung
 fly/evolution.py   Gene, Kreuzung, Mutation, Auslese
 fly/report.py      Kennzahlen
+fly/daily.py       Tagessignal für den Cron-Lauf
 ```
