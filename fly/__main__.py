@@ -5,14 +5,22 @@ Kommandozeile.
     python -m fly diagnose                  riecht eine einzelne Fliege überhaupt etwas?
     python -m fly lab --seeds 1 2 3         Zucht + beide Kontrollversuche, mehrere Seeds
     python -m fly evolve --friedhof         zusätzlich der Friedhofs-Test (sparsam benutzen!)
+    python -m fly evolve --senses v3        neue Sinne (Kredit/Breite/Flucht) statt v2
+    python -m fly evolve --since 2008-01-01 nur Tage ab diesem Datum (fairer Vergleich)
 
 Der Friedhof (ab 2025) ist die einzige Prüfung, die die Evolution nie gesehen
 hat. Jedes Mal, wenn man ihn anschaut und danach am Design dreht, wird er ein
 Stück weniger unberührt. Deshalb ist er ein Flag und nicht der Standard.
+
+`--senses` (oder Umgebungsvariable FLY_SENSES) wählt zwischen v2 (SPY/VIX/Zins,
+ab 1993) und v3 (+Kredit/Breite/Flucht, Historie automatisch ab ~2007/2008).
+Weil v3 eine kürzere Historie hat, sind v2- und v3-Ergebnisse nur mit `--since`
+auf demselben Zeitraum fair vergleichbar.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -32,8 +40,10 @@ SKULL_SEED = 0
 RESULTS = Path(__file__).resolve().parent.parent / "results"
 
 
-def build(refresh: bool):
-    market = Market(load_closes(refresh=refresh))
+def build(refresh: bool, senses: str = "v2", since: str | None = None):
+    market = Market(load_closes(refresh=refresh, senses=senses))
+    if since:
+        market = market.since(since)
     n_channels = channels(market.closes.iloc[:400]).shape[1]
     skull = Skull.grow(n_channels, seed=SKULL_SEED)
     return market, skull
@@ -76,9 +86,9 @@ def friedhof(market, skull, res: Result) -> pd.DataFrame:
     }, index=days)
 
 
-def save(res: Result, world: World, extra: str = "") -> Path:
+def save(res: Result, world: World, extra: str = "", senses: str = "v2") -> Path:
     cfg = res.config
-    out = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}_{cfg.fitness}_{cfg.control}_s{cfg.seed}"
+    out = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}_{senses}_{cfg.fitness}_{cfg.control}_s{cfg.seed}"
     out.mkdir(parents=True, exist_ok=True)
     res.generations.to_csv(out / "generations.csv", index=False)
     sv = res.survivors
@@ -108,7 +118,7 @@ def make_config(args, **over) -> Config:
 def cmd_evolve(args, market, skull):
     cfg = make_config(args, control=args.control, fitness=args.fitness, seed=args.seed)
     print(f"Zucht: {cfg.population} Fliegen, {cfg.survivors} überleben, Fitness={cfg.fitness}, "
-          f"Kontrolle={cfg.control}, Seed={cfg.seed}")
+          f"Kontrolle={cfg.control}, Seed={cfg.seed}, Sinne={args.senses}")
     res, world = run_one(market, skull, cfg, args.generations, quiet=False)
     wf = res.walk_forward
     rows = {"Schwarm (walk-forward)": stats(wf, res.walk_forward_positions),
@@ -130,7 +140,7 @@ def cmd_evolve(args, market, skull):
         print()
         print(table(rows_fh))
     print()
-    print(f"Gespeichert: {save(res, world, extra)}")
+    print(f"Gespeichert: {save(res, world, extra, senses=args.senses)}")
 
 
 def cmd_lab(args, market, skull):
@@ -146,7 +156,7 @@ def cmd_lab(args, market, skull):
                 cfg = make_config(args, control=control, fitness=fitness, seed=seed)
                 print(f"… Fitness={fitness}, Kontrolle={control}, Seed {seed}", flush=True)
                 res, world = run_one(market, skull, cfg, args.generations, quiet=True)
-                save(res, world)
+                save(res, world, senses=args.senses)
                 runs.append({"fitness": fitness, "control": control, "seed": seed,
                              **stats(res.walk_forward, res.walk_forward_positions)})
                 bench = stats(buy_and_hold(world, res.walk_forward.index))
@@ -204,6 +214,12 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")   # Windows-Konsole: Umlaute
     p = argparse.ArgumentParser(prog="fly", description="Fly of Wallstreet — Fliegenzucht für SPY")
     p.add_argument("--refresh", action="store_true", help="Kursdaten neu laden")
+    p.add_argument("--senses", default=os.environ.get("FLY_SENSES", "v2"), choices=["v2", "v3"],
+                    help="Sinnesumfang: v2 (SPY/VIX/Zins, ab 1993) oder v3 (+Kredit/Breite/Flucht, "
+                         "Historie automatisch kürzer). Auch per Umgebungsvariable FLY_SENSES.")
+    p.add_argument("--since", default=None,
+                    help="nur Tage ab diesem Datum (z.B. 2008-01-01) — für einen fairen Vergleich "
+                         "von v2- und v3-Sinnen auf demselben Zeitraum")
     sub = p.add_subparsers(dest="cmd", required=True)
     fitness_modes = ["worst", "pooled", "excess"]
     controls = ["none", "random-selection", "shuffled-dopamine"]
@@ -225,7 +241,8 @@ def main():
             s.add_argument("--controls", nargs="+", default=controls, choices=controls)
     sub.add_parser("diagnose")
     args = p.parse_args()
-    market, skull = build(args.refresh)
+    print(f"Sinne={args.senses}" + (f", ab {args.since}" if args.since else "") + f", Friedhof-Cutoff={CUTOFF}")
+    market, skull = build(args.refresh, args.senses, args.since)
     {"evolve": cmd_evolve, "lab": cmd_lab, "diagnose": cmd_diagnose}[args.cmd](args, market, skull)
 
 

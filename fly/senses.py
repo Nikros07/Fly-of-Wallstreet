@@ -2,11 +2,19 @@
 Die Sinne der Fliege — ihre Projektionsneuronen.
 
 Bei der echten Fliege melden ~50 Glomeruli, welcher Duft gerade in der Luft
-liegt. Hier melden 15 Marktmerkmale, wie der Markt heute "riecht". Jedes
+liegt. Hier melden Marktmerkmale, wie der Markt heute "riecht". Jedes
 Merkmal wird in zwei Kanäle zerlegt — AN (Wert über normal) und AUS (Wert unter
 normal) —, wie die ON/OFF-Zellen im Sehsystem der Fliege. So kann eine
 Kenyon-Zelle auf "Volatilität ungewöhnlich HOCH" hören, ohne dass ihr ein
 negatives Vorzeichen dazwischenfunkt.
+
+v2 riecht nur, was es 1993 schon gab: SPY, VIX, 10-Jahres-Zins (15 Merkmale).
+v3 riecht zusätzlich vier Dinge, die es damals noch nicht gab (erst ab den
+2000ern handelbar): Kreditaufschlag (HYG/LQD), Marktbreite (RSP/SPY) und zwei
+Fluchtwerte, Gold und lange Anleihen, je relative Stärke gegen SPY. Diese
+Merkmale entstehen nur, wenn die entsprechenden Spalten in `closes` vorhanden
+sind (siehe `fly.data.load_closes(senses=...)`) — sonst bleibt `raw_features`
+exakt beim v2-Merkmalssatz.
 
 Kein Merkmal nutzt Daten nach dem Schluss des jeweiligen Tages. Der Test
 `test_senses_do_not_look_ahead` prüft das, indem er die Zukunft abschneidet
@@ -38,6 +46,22 @@ def raw_features(closes: pd.DataFrame) -> pd.DataFrame:
     f["vix_change_5"] = np.log(vix).diff(5)
     f["tnx_change_20"] = tnx.diff(20)
     f["tnx_change_60"] = tnx.diff(60)
+
+    # v3: Sinne, die es 1993 noch nicht gab — nur falls die Spalten geladen sind
+    # (siehe fly.data.load_closes). Je ein Verhältnis, als log-Differenz über
+    # mehrere Zeitskalen — im selben Stil wie ret_n oben: Vorzeichen bleibt die
+    # Information (Risikoappetit steigt/fällt, Breite weitet/verengt sich, ...).
+    ratios = {
+        "credit": ("hyg", "lqd"),     # Kreditaufschlag: Risikoappetit am Anleihemarkt
+        "breadth": ("rsp", "spy"),    # Marktbreite: gleichgewichtet gegen kapitalgewichtet
+        "gold_rel": ("gld", "spy"),   # Fluchtwert Gold, relative Stärke
+        "bonds_rel": ("tlt", "spy"),  # Fluchtwert lange Anleihen, relative Stärke
+    }
+    for name, (a, b) in ratios.items():
+        if a in closes.columns and b in closes.columns:
+            ratio = np.log(closes[a]) - np.log(closes[b])
+            for n in (5, 20, 60):
+                f[f"{name}_{n}"] = ratio.diff(n)
     return f
 
 
