@@ -1,35 +1,76 @@
-name: Tagessignal
+name: Kolonie
 
-# Werktags 22:40 UTC — nach US-Börsenschluss (22:00 UTC im Sommer, 21:00 im Winter),
-# mit Puffer, bis Yahoo den Schlusskurs des Tages hat.
+# Nach US-Börsenschluss (20:00 UTC Sommer / 21:00 UTC Winter). GitHub-Cron kann
+# sich bei Last um Stunden verspäten oder ausfallen — deshalb zwei Termine, nicht
+# zur vollen Stunde. Ein zweiter Lauf am selben Tag ändert nichts (idempotent).
+# Die wöchentliche Auslese (10 % Tod, 10 % Klone) passiert automatisch im ersten
+# Lauf nach einem Wochenwechsel.
 on:
   schedule:
-    - cron: "40 22 * * 1-5"
-  workflow_dispatch:        # Knopf zum Selbststarten im Actions-Tab
+    - cron: "17 21 * * 1-5"
+    - cron: "47 23 * * 1-5"
+  workflow_dispatch:          # Knopf zum Selbststarten im Actions-Tab
 
 permissions:
-  contents: write           # der Lauf schreibt Signal und Gedächtnis ins Repo zurück
+  contents: write             # Signal nach main, Zustand nach fly-state
 
 concurrency:
-  group: tagessignal        # nie zwei Läufe gleichzeitig am selben Gedächtnis
+  group: kolonie              # nie zwei Läufe gleichzeitig am selben Zustand
   cancel-in-progress: false
 
 jobs:
-  signal:
+  leben:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main                 # aktueller Stand, nicht der SHA beim Auslösen
+
+      - name: Zustand vom Zweig fly-state holen (nur Arbeitsbaum, nie in den Index)
+        run: |
+          if git fetch -q origin fly-state; then
+            git restore --source=FETCH_HEAD --worktree -- state/
+          else
+            echo "Noch kein Zustand — die Kolonie wird gegründet."
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
-      - run: python -m fly.daily
-      - name: Signal und Gedächtnis zurückschreiben
+
+      - name: Weiterleben, auslesen, abstimmen
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}          # optional: Papierkonto
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
         run: |
-          git config user.name "fly-of-wallstreet[bot]"
-          git config user.email "noreply@github.com"
-          git add swarm/
-          git diff --staged --quiet || git commit -m "Tagessignal $(date -u +%F)"
-          git push
+          if [ -f state/colony.npz ]; then python -m fly.live step; else python -m fly.live init; fi
+
+      - name: Zustand nach fly-state (ein Commit, jedes Mal ersetzt)
+        run: |
+          git config --global user.name "fly-of-wallstreet[bot]"
+          git config --global user.email "noreply@github.com"
+          # Eigener Arbeitsbaum, damit main unberührt bleibt; so wächst das Repo
+          # nicht um täglich 1,5 MB Gedächtnis.
+          git worktree add -q --detach "$RUNNER_TEMP/zustand"
+          cd "$RUNNER_TEMP/zustand"
+          git checkout -q --orphan zustand
+          git rm -r -q --cached . && git clean -fdxq
+          cp -r "$GITHUB_WORKSPACE/state" .
+          git add -f state/
+          git commit -q -m "Zustand $(date -u +%F)"
+          git push -f -q origin zustand:fly-state
+
+      - name: Signal nach main
+        run: |
+          git add signals.csv
+          git diff --staged --quiet && exit 0
+          git commit -q -m "Signal $(date -u +%F)"
+          for i in 1 2 3; do
+            git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0
+            sleep 5
+          done
+          exit 1

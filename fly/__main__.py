@@ -210,6 +210,104 @@ def cmd_diagnose(args, market, skull):
             print(f"{name:10}{lr:>6}{fg:>8.0e}{h:>4}{ic:>+8.3f}")
 
 
+REGIMES = {
+    "2000-02 Dotcom-Crash": ("2000", "2002"), "2003-07 Bullen": ("2003", "2007"),
+    "2008-09 Finanzkrise": ("2008", "2009"), "2010-19 Bullen": ("2010", "2019"),
+    "2020 Corona": ("2020", "2020"), "2021 Bullen": ("2021", "2021"),
+    "2022 Zinsschock": ("2022", "2022"), "2023-24 Bullen": ("2023", "2024"),
+    "2025- Friedhof": ("2025", "2099"),
+}
+
+
+def regimes(fly: pd.Series, spy: pd.Series) -> dict:
+    """p.a.-Rendite von Fliege und SPY je Marktphase — wo verdient sie, wo verliert sie?"""
+    rows = {}
+    for name, (a, b) in REGIMES.items():
+        f, m = fly.loc[a:b], spy.loc[a:b]
+        if len(f) < 20:
+            continue
+        pa = lambda x: (1 + x).prod() ** (252 / len(x)) - 1
+        rows[name] = {"Fliege": pa(f), "SPY": pa(m), "Diff": pa(f) - pa(m)}
+    return rows
+
+
+def cmd_colony(args, market, skull):
+    """
+    Wochenzucht (fly/colony.py): 50 Fliegen leben ohne Pause, jede Woche sterben
+    die schlechtesten 10 % und die besten 10 % werden geklont. Die Kolonie lebt
+    ab 1994; bewertet wird der Schwarm ab `--report-from` (Standard 2000).
+    """
+    from fly.colony import Colony, ColonyConfig
+    from fly.population import MAX_HORIZON, realized
+    world = World.build(market.until(CUTOFF), skull)
+    T = len(world.days)
+    # Vergleichsmaßstab mit derselben Ausführung: Eröffnung zu Eröffnung
+    bench = pd.Series(np.nan_to_num(world.open_returns()), index=world.days)
+    runs, flies = [], []
+
+    def swarm_pnl(pos, w, t0, t1, past=None):
+        pad = np.zeros((1, MAX_HORIZON), np.int8) if past is None else past[None, -MAX_HORIZON:]
+        return realized(np.concatenate([pad, pos[None]], axis=1), t0 - MAX_HORIZON, t0, t1, w)[0]
+
+    for control in args.controls:
+        for seed in args.seeds:
+            cfg = ColonyConfig(control=control, seed=seed, turnover=args.turnover,
+                               window=args.window, quorum=args.quorum, exams=args.exams)
+            col = Colony.found(cfg, skull.n_kc)
+            learn = (world.with_shuffled_learning(np.random.default_rng(seed))
+                     if control == "shuffled-dopamine" else None)
+            started = time.time()
+            swarm, _ = col.advance(world, 0, T, learn)
+            daily = pd.Series(swarm_pnl(swarm, world, 0, T), index=world.days)
+            pos = pd.Series(swarm, index=world.days)
+            rep = slice(args.report_from, pd.Timestamp(CUTOFF) - pd.Timedelta(days=1))
+            runs.append({"control": control, "seed": seed,
+                         **stats(daily.loc[rep], pos.loc[rep])})
+            print(f"… {control:18} Seed {seed}: Sharpe {runs[-1]['Sharpe']:+.2f}  "
+                  f"p.a. {runs[-1]['p.a.']:+.1%}  ({time.time() - started:.0f}s)", flush=True)
+
+            out = RESULTS / f"colony_w{args.window}_e{args.exams}_{control}_s{seed}"
+            out.mkdir(parents=True, exist_ok=True)
+            col.save(out / "colony.npz")
+            pd.DataFrame(col.log).to_csv(out / "weeks.csv", index=False)
+            pd.DataFrame({"swarm": daily, "position": pos}).to_csv(out / "walk_forward.csv")
+
+            if control == "none":
+                if args.friedhof:
+                    full = World.build(market, skull)
+                    t0, t1 = int(np.searchsorted(full.days, pd.Timestamp(CUTOFF))), len(full.days)
+                    fs, _ = col.advance(full, t0, t1)
+                    fdaily = pd.Series(swarm_pnl(fs, full, t0, t1, past=swarm), index=full.days[t0:t1])
+                    daily = pd.concat([daily, fdaily])
+                    bench = pd.Series(np.nan_to_num(full.open_returns()), index=full.days)
+                    col.save(out / "colony_heute.npz")
+                    runs[-1]["Friedhof Sharpe"] = stats(fdaily)["Sharpe"]
+                    runs[-1]["Friedhof p.a."] = stats(fdaily)["p.a."]
+                flies.append(daily)
+
+    df = pd.DataFrame(runs)
+    mean = df.groupby("control", sort=False).mean(numeric_only=True)
+    summary = {c: {k: r[k] for k in ("p.a.", "Sharpe", "MaxDD", "investiert", "Wechsel")
+                   if k in r} for c, r in mean.iterrows()}
+    spy_rep = bench.loc[args.report_from:pd.Timestamp(CUTOFF) - pd.Timedelta(days=1)]
+    summary["SPY Buy & Hold"] = {k: v for k, v in stats(spy_rep).items()
+                                 if k in ("p.a.", "Sharpe", "MaxDD")}
+    print(f"\nWochenzucht, Schwarm walk-forward ab {args.report_from} bis 2024, "
+          f"Mittel über {len(args.seeds)} Seeds:\n")
+    print(table(summary))
+    if flies:
+        avg = pd.concat(flies, axis=1).mean(axis=1)
+        print("\nJe Marktphase (echte Zucht, Mittel über Seeds):\n")
+        print(table(regimes(avg, bench.reindex(avg.index).fillna(0.0))))
+    if args.friedhof:
+        fh = df.dropna(subset=["Friedhof Sharpe"])
+        spy_fh = stats(bench.loc[CUTOFF:])
+        print(f"\nFRIEDHOF ab {CUTOFF}: Schwarm Sharpe {fh['Friedhof Sharpe'].mean():+.2f} "
+              f"(p.a. {fh['Friedhof p.a.'].mean():+.1%}) — SPY Sharpe {spy_fh['Sharpe']:+.2f} "
+              f"(p.a. {spy_fh['p.a.']:+.1%})")
+    df.to_csv(RESULTS / f"colony_lab_w{args.window}_e{args.exams}.csv", index=False)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")   # Windows-Konsole: Umlaute
     p = argparse.ArgumentParser(prog="fly", description="Fly of Wallstreet — Fliegenzucht für SPY")
@@ -240,10 +338,19 @@ def main():
             s.add_argument("--fitness", nargs="+", default=["excess"], choices=fitness_modes)
             s.add_argument("--controls", nargs="+", default=controls, choices=controls)
     sub.add_parser("diagnose")
+    c = sub.add_parser("colony", help="Wochenzucht: jede Woche 10 %% Tod, 10 %% Klone")
+    c.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
+    c.add_argument("--controls", nargs="+", default=controls, choices=controls)
+    c.add_argument("--turnover", type=float, default=0.10)
+    c.add_argument("--window", type=int, default=126, help="Handelstage Bilanz")
+    c.add_argument("--quorum", type=int, default=6)
+    c.add_argument("--exams", type=int, default=0, help="Prüfungen auf älteren Zeiträumen je Woche")
+    c.add_argument("--report-from", default="2000-01-01")
+    c.add_argument("--friedhof", action="store_true")
     args = p.parse_args()
     print(f"Sinne={args.senses}" + (f", ab {args.since}" if args.since else "") + f", Friedhof-Cutoff={CUTOFF}")
     market, skull = build(args.refresh, args.senses, args.since)
-    {"evolve": cmd_evolve, "lab": cmd_lab, "diagnose": cmd_diagnose}[args.cmd](args, market, skull)
+    {"evolve": cmd_evolve, "lab": cmd_lab, "diagnose": cmd_diagnose, "colony": cmd_colony}[args.cmd](args, market, skull)
 
 
 if __name__ == "__main__":

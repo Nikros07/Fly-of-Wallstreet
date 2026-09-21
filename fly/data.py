@@ -31,17 +31,17 @@ TICKERS = {"spy": "SPY", "vix": "^VIX", "tnx": "^TNX"}
 TICKERS_V3 = {"hyg": "HYG", "lqd": "LQD", "rsp": "RSP", "gld": "GLD", "tlt": "TLT"}
 
 
-def _download(ticker: str) -> pd.Series:
+def _download(ticker: str, field: str = "Close") -> pd.Series:
     import yfinance as yf
 
     df = yf.download(ticker, start=START, auto_adjust=True, progress=False)
     if df.empty:
         raise RuntimeError(f"Yahoo lieferte keine Daten für {ticker}")
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):  # neuere yfinance-Versionen: MultiIndex
-        close = close.iloc[:, 0]
-    close.index = pd.to_datetime(close.index).tz_localize(None)
-    return close.rename(ticker).dropna()
+    col = df[field]
+    if isinstance(col, pd.DataFrame):  # neuere yfinance-Versionen: MultiIndex
+        col = col.iloc[:, 0]
+    col.index = pd.to_datetime(col.index).tz_localize(None)
+    return col.rename(ticker).dropna()
 
 
 def load_closes(refresh: bool = False, senses: str = "v2") -> pd.DataFrame:
@@ -59,6 +59,12 @@ def load_closes(refresh: bool = False, senses: str = "v2") -> pd.DataFrame:
             _download(ticker).to_csv(path)
         s = pd.read_csv(path, index_col=0, parse_dates=True).iloc[:, 0]
         cols[name] = s
+    # SPY-Eröffnung: Dort wird ausgeführt. Die Fliege entscheidet auf Schlusskursen
+    # (SPY 16:00, VIX erst 16:15 ET) und kann frühestens zur nächsten Eröffnung handeln.
+    path = DATA_DIR / "spy_open.csv"
+    if refresh or not path.exists():
+        _download("SPY", "Open").to_csv(path)
+    cols["spy_open"] = pd.read_csv(path, index_col=0, parse_dates=True).iloc[:, 0]
     spy_days = cols["spy"].index
     # VIX/TNX an SPY-Tage hängen; Lücken (Feiertage einer Quelle) mit dem
     # letzten bekannten Wert füllen — nie mit einem späteren.
@@ -68,7 +74,7 @@ def load_closes(refresh: bool = False, senses: str = "v2") -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class Market:
-    closes: pd.DataFrame  # Spalten spy, vix, tnx; Index = Handelstage
+    closes: pd.DataFrame  # Spalten spy, spy_open, vix, tnx; Index = Handelstage
 
     @property
     def days(self) -> pd.DatetimeIndex:

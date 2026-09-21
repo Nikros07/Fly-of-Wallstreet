@@ -50,6 +50,13 @@ class World:
     ret1: np.ndarray      # (T,) Rendite Schluss t -> Schluss t+1 (Handelsergebnis)
     fwd: np.ndarray       # (T, MAX_HORIZON+1) log-Rendite t -> t+h (Lernsignal)
     vol: np.ndarray       # (T,) tägliche Schwankung, bekannt zum Schluss von t
+    ropen: np.ndarray | None = None   # (T,) Eröffnung t-1 -> Eröffnung t (Ausführung)
+
+    def open_returns(self) -> np.ndarray:
+        """Eröffnung-zu-Eröffnung; ohne Eröffnungskurse (Testwelten) Schluss t-1 -> t."""
+        if self.ropen is not None:
+            return self.ropen
+        return np.r_[np.nan, self.ret1[:-1]]
 
     @classmethod
     def build(cls, market: Market, skull: Skull) -> "World":
@@ -59,20 +66,31 @@ class World:
         fwd = np.stack([(logp.shift(-h) - logp).reindex(days).to_numpy()
                         for h in range(MAX_HORIZON + 1)], axis=1)
         vol = raw_features(market.closes)["vol_20"].reindex(days).to_numpy()
+        ropen = None
+        if "spy_open" in market.closes:
+            o = market.closes["spy_open"]
+            ropen = (o / o.shift(1) - 1.0).reindex(days).to_numpy()
         return cls(days=days,
                    kc=skull.smell(ch.to_numpy()),
                    ret1=market.next_day_returns().reindex(days).to_numpy(),
                    fwd=fwd,
-                   vol=vol)
+                   vol=vol,
+                   ropen=ropen)
 
     def with_shuffled_learning(self, rng: np.random.Generator) -> "World":
         """
         Kontrollversuch: Die Fliegen handeln in der echten Welt, bekommen aber
         Dopamin für die Ergebnisse zufälliger ANDERER Tage. Wer so genauso gut
         abschneidet, hat nie etwas gelernt.
+
+        Nur aus der VERGANGENHEIT gezogen (Tag s bekommt das Ergebnis eines
+        Tages <= s): Eine Mischung über alle Tage verriet der Kontrolle die
+        Durchschnittsrendite der ganzen Stichprobe — sie wusste vorab, dass es
+        sich lohnt, long zu sein, und war eine Kontrolle mit Zukunftswissen.
         """
-        perm = rng.permutation(len(self.days))
-        return World(self.days, self.kc, self.ret1, self.fwd[perm], self.vol[perm])
+        T = len(self.days)
+        idx = (rng.random(T) * (np.arange(T) + 1)).astype(int)
+        return World(self.days, self.kc, self.ret1, self.fwd[idx], self.vol[idx], self.ropen)
 
     def quarters(self) -> list[tuple[int, int]]:
         """Tagesindex-Spannen [t0, t1) je Kalenderquartal."""
@@ -135,27 +153,36 @@ class Population:
 
 
 def live(pop: Population, world: World, t0: int, t1: int, learn: bool = True,
-         values_out: np.ndarray | None = None) -> np.ndarray:
+         values_out: np.ndarray | None = None, past: np.ndarray | None = None) -> np.ndarray:
     """
     Lässt alle Fliegen die Tage [t0, t1) erleben. Rückgabe: Positionen (P, n)
     mit +1 Long, 0 NO TRADE, -1 Short. Mit learn=False ist es eine Prüfung:
     Die Fliege handelt nur mit dem, was sie schon weiß.
 
+    `past` (P, MAX_HORIZON): die Positionen der Tage t0-MAX_HORIZON .. t0-1.
+    Ohne sie gilt die Zeit davor als NO TRADE. Wer die Tage in Stücken erleben
+    lässt (Woche für Woche, Tag für Tag im Live-Betrieb), muss sie weiterreichen,
+    sonst weiß die Fliege an jeder Stückgrenze nicht mehr, was sie getan hat —
+    und lernt anders als in einem Zug.
+
     `values_out` (P, n, 2) nimmt auf Wunsch die Werte auf, auf denen jede
     Entscheidung beruhte — für die Diagnose, ob die Fliege etwas "riecht".
     """
     P, n = pop.size, t1 - t0
-    positions = np.zeros((P, n), dtype=np.int8)
+    buf = np.zeros((P, MAX_HORIZON + n), dtype=np.int8)   # [Vergangenheit | dieses Stück]
+    if past is not None:
+        buf[:, :MAX_HORIZON] = past
     for t in range(t0, t1):
         if values_out is not None:
             values_out[:, t - t0] = pop.values(world.kc[t])
-        positions[:, t - t0] = pop.decide(world.kc[t])
+        buf[:, MAX_HORIZON + t - t0] = pop.decide(world.kc[t])
         if learn:
-            _learn(pop, world, t, t0, positions)
-    return positions
+            _learn(pop, world, t, t0 - MAX_HORIZON, buf)
+    return buf[:, MAX_HORIZON:]
 
 
-def _learn(pop: Population, world: World, t: int, t0: int, positions: np.ndarray) -> None:
+def _learn(pop: Population, world: World, t: int, origin: int, buf: np.ndarray) -> None:
+    """`buf[:, i]` ist die Position am Tag origin + i."""
     g = pop.genes
     h = g["horizon"].astype(int)
     s = t - h                                       # der Tag, dessen Ergebnis heute feststeht
@@ -168,9 +195,10 @@ def _learn(pop: Population, world: World, t: int, t0: int, positions: np.ndarray
                         -move - 2 * COST - BORROW * h], axis=1)
     z = outcome / scale[:, None]
 
-    # Was hat die Fliege am Tag s tatsächlich getan? Vor diesem Lebensabschnitt: nichts.
-    in_window = s >= t0
-    taken = np.where(in_window, positions[np.arange(pop.size), np.clip(s - t0, 0, None)], 0)
+    # Was hat die Fliege am Tag s tatsächlich getan? Unbekannt vor dem Puffer: nichts.
+    col = s - origin
+    known = col >= 0
+    taken = np.where(known, buf[np.arange(pop.size), np.clip(col, 0, None)], 0)
     miss = g["miss_weight"][:, None]
     weight = np.stack([np.where(taken == 1, 1.0, miss[:, 0]),
                        np.where(taken == -1, 1.0, miss[:, 0])], axis=1)
@@ -192,12 +220,45 @@ def _learn(pop: Population, world: World, t: int, t0: int, positions: np.ndarray
     pop.nogo += f * (1.0 - pop.nogo)
 
 
-def pnl(positions: np.ndarray, world: World, t0: int, t1: int) -> np.ndarray:
-    """Tagesergebnis je Fliege nach Kosten, Form (P, n). Start aus NO TRADE."""
+def pnl(positions: np.ndarray, world: World, t0: int, t1: int,
+        prev: np.ndarray | None = None) -> np.ndarray:
+    """
+    Tagesergebnis je Fliege nach Kosten, Form (P, n). `prev` (P,) ist die
+    Position am Vortag; ohne sie startet das Stück aus NO TRADE und zahlt den
+    Einstieg — richtig für einen echten Start, falsch mitten im Leben.
+    """
     ret = np.nan_to_num(world.ret1[t0:t1])
-    prev = np.concatenate([np.zeros((positions.shape[0], 1), np.int8), positions[:, :-1]], axis=1)
-    turnover = np.abs(positions.astype(float) - prev)
+    first = np.zeros((positions.shape[0], 1), np.int8) if prev is None else         np.asarray(prev, np.int8).reshape(-1, 1)
+    before = np.concatenate([first, positions[:, :-1]], axis=1)
+    turnover = np.abs(positions.astype(float) - before)
     return positions * ret - COST * turnover - BORROW * (positions == -1)
+
+
+EXEC_LAG = 2   # Entscheidung am Schluss t -> gekauft zur Eröffnung t+1 -> Ergebnis ab Eröffnung t+2
+
+
+def realized(full: np.ndarray, origin: int, t0: int, t1: int, world: World) -> np.ndarray:
+    """
+    Tatsächlich erzieltes Ergebnis der Tage [t0, t1), gebucht an dem Tag, an dem
+    es feststeht. `full[:, i]` ist die Position vom Schluss des Tages origin + i.
+
+    Die Position vom Schluss t-2 wurde zur Eröffnung t-1 ausgeführt und bringt
+    Eröffnung t-1 -> Eröffnung t; das steht zur Eröffnung von t fest. Die Kosten
+    fallen beim Umschichten zur Eröffnung t-1 an. Keine Rendite, die man real
+    nicht bekommen hätte, und keine, die erst später bekannt wäre.
+    """
+    r = np.nan_to_num(world.open_returns()[t0:t1])
+
+    def col(lag):
+        i = np.arange(t0, t1) - lag - origin
+        out = np.zeros((full.shape[0], t1 - t0), np.int8)
+        ok = i >= 0
+        out[:, ok] = full[:, i[ok]]
+        return out
+
+    held, before = col(EXEC_LAG), col(EXEC_LAG + 1)
+    turnover = np.abs(held.astype(float) - before)
+    return held * r - COST * turnover - BORROW * (held == -1)
 
 
 def sharpe(daily: np.ndarray) -> np.ndarray:

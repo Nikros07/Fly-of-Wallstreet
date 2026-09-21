@@ -90,13 +90,15 @@ nur abschwächt, bleiben alle Gewichte in [0, 1]; nichts kann explodieren.
 
 Evolution ist die stärkste Überanpassungsmaschine, die es gibt. Deshalb:
 
-1. **Walk-forward:** Der Schwarm der Vorgeneration sagt jedes Quartal vorher, *bevor* es irgendwen ausliest. Nur diese Kurve zählt als Ergebnis.
+1. **Walk-forward:** Der Schwarm sagt jeden Tag vorher, bevor er ausgewertet wird. Ausgeführt wird zur nächsten Eröffnung, gebucht erst, wenn das Ergebnis feststeht. Nur diese Kurve zählt.
 2. **Kontrollversuch Zufallsauslese** (`random-selection`): Gelöscht wird zufällig statt nach Leistung. Ist das genauso gut, bringt die Evolution nichts.
-3. **Kontrollversuch Zufallsdopamin** (`shuffled-dopamine`): Belohnungen stammen von zufälligen anderen Tagen. Ist das genauso gut, lernen die Fliegen nichts.
+3. **Kontrollversuch Zufallsdopamin** (`shuffled-dopamine`): Belohnungen stammen von zufälligen *früheren* Tagen. Ist das genauso gut, lernen die Fliegen nichts.
 4. **Friedhof:** Ab 2025 existieren die Daten für die Evolution physisch nicht (`Market.until`). Nur der fertige Schwarm wird einmal darauf losgelassen — per `--friedhof`, bewusst sparsam.
 5. **Tests** (`tests/`) sichern ab: keine Entscheidung hängt von späteren Kursen ab, Lernen geht in die richtige Richtung, Kinder erben jedes Muster ganz.
 
 ## Ergebnis v2 (2026-09-19) — die Fliegen lernen etwas Echtes, aber wenig
+
+> **Nachtrag v4:** gemessen mit Schlusskurs-Ausführung und einer Kontrolle mit Zukunftswissen (siehe v4) — der Vorsprung vor der Kontrolle ist damit nicht belastbar.
 
 Walk-forward 1995–2024, Fitness `excess`, 8 Seeds (3 zum Entwickeln, 5 frische zum Prüfen):
 
@@ -125,6 +127,71 @@ Walk-forward 1995–2024, Fitness `excess`, 8 Seeds (3 zum Entwickeln, 5 frische
 Was **nicht** hilft: die Bauweise des Schädels. 2000 vs. 5000 Kenyon-Zellen, 3–12 Eingänge, 2–10 % Aktivität — alle riechen gleich viel. Die natürliche Fliegenverdrahtung bleibt.
 
 Was die Evolution **von selbst** gefunden hat: `miss_weight` sinkt auf 0,01–0,3 — Verpasstes soll tatsächlich nur leise wehtun.
+
+## Ergebnis v4 (2026-09-21) — Wochenzucht, nach Fehlerprüfung: kein Vorsprung
+
+**Die Kolonie** (`fly/colony.py`, so läuft sie live): 50 Fliegen leben ohne Pause.
+Jede Woche sterben die schlechtesten 10 %, die besten 10 % werden geklont (Gedächtnis
++ Bilanz, Gene mutieren). Bewertet wird jede Fliege an ihren echten Vorhersagen der
+letzten 2 Jahre plus 2 Wiederholungsprüfungen auf älteren Quartalen. Die 10 Besten
+stimmen die Woche über ab.
+
+Walk-forward 2000–2024, **8 Seeds**, Ausführung zur nächsten Eröffnung:
+
+| | p.a. | Sharpe | MaxDD | investiert |
+|---|---|---|---|---|
+| **Kolonie** | +6,2 % | 0,44 | 47 % | 89 % |
+| Kontrolle Zufallsdopamin (nur Vergangenheit) | +6,0 % | 0,41 | 52 % | 95 % |
+| SPY Buy & Hold (Eröffnung zu Eröffnung) | +7,7 % | 0,48 | 55 % | 100 % |
+| **Friedhof 2025–heute, Kolonie** (einmalig) | +16,8 % | 0,97 | — | — |
+| Friedhof 2025–heute, SPY | +17,5 % | 1,01 | — | — |
+
+**Ehrliches Urteil:** Die Kolonie ist ein leicht defensiver SPY-Halter. Sie schlägt die
+Kontrolle nur in 4 von 8 Seeds — der Unterschied ist Rauschen. Etwas weniger Absturz,
+etwas weniger Rendite als der Markt. Ein Lernvorsprung ist **nicht** nachgewiesen.
+
+### Was die Prüfung gefunden hat (zwei unabhängige Prüf-Agenten, alle Befunde belegt)
+
+1. **Die Kontrolle hatte Zukunftswissen.** „Zufallsdopamin" mischte Belohnungen über
+   *alle* Tage und kannte so die Durchschnittsrendite der ganzen Stichprobe. Jetzt zieht
+   sie nur aus der Vergangenheit (Test `test_shuffled_control_does_not_learn_from_the_future`).
+   **Alle Kontrollvergleiche in v1–v3 liefen gegen diese verzerrte Kontrolle.**
+2. **Unerreichbare Ausführung.** Der Backtest buchte die Rendite ab dem Schlusskurs, auf
+   dem die Entscheidung erst beruht (der VIX schließt sogar erst 15 Minuten nach SPY).
+   Jetzt: Entscheidung am Schluss, Kauf zur nächsten Eröffnung, gebucht erst, wenn das
+   Ergebnis feststeht (Test `test_position_earns_only_from_next_open`). **v1–v3 sind mit
+   Schlusskurs-Ausführung gemessen und damit zu optimistisch.**
+3. **Die „Prüfungen" auf älteren Quartalen sind keine Prüfungen außerhalb der Stichprobe** —
+   das Gedächtnis kennt diese Tage schon. Sie belohnen, altes Wissen zu behalten. Die
+   Walk-forward-Entscheidungen bleiben trotzdem echte Vorhersagen.
+4. **Live-Workflow wäre ab dem 2. Lauf kaputt gewesen** (Zustand im Git-Index →
+   Abbruch, Zustand nie wieder gespeichert). Behoben und mit einem lokalen Test-Repo über
+   3 Läufe nachgestellt.
+5. **Live-Details:** vorläufiger Schlusskurs, veraltete Yahoo-Antwort, Broker-Fehler, die
+   den Lauf abbrechen, doppelte Orders bei zwei Läufen am Abend — alles abgefangen und
+   getestet (`test_paper_broker_is_idempotent_on_double_run`).
+
+### Verlauf der Wochenzucht-Versuche (vor der Fehlerbehebung, zur Nachvollziehbarkeit)
+
+- Ohne Wiederholungsprüfungen jagt die Wochenzucht dem letzten Halbjahr hinterher
+  (Sharpe 0,13, MaxDD 60 %): Befördert wird, wer zuletzt richtig lag — nach einer Rally
+  die Long-Fliegen, direkt in den Crash.
+- Die beste von 4 Varianten sah auf Seeds 1–3 nach „schlägt den Markt" aus (Sharpe 0,54);
+  auf frischen Seeds 4–8 nicht mehr (0,43). Auswahlglück.
+- Bedingtes Volatility-Targeting über der Fliege (`fly/overlay.py`, Regeln vorab
+  festgelegt): Sharpe 0,57 statt 0,54, aber MaxDD 46 % statt 40 % — nicht aktiv.
+- Mehrmarkt-Fliegen auf 9 Sektor-ETFs: Sharpe 0,17 gegen Kontrolle 0,42 (Zweig `v3-multi`).
+
+### Nächste Ideen (Web-Recherche, noch nicht umgesetzt)
+
+| Idee | Warum | Quelle |
+|---|---|---|
+| Dopamin als **Vorhersagefehler** + Extinktion als zweite Gedächtnisspur | Reines Abschwächen mit absoluter Belohnung treibt die Gewichte gegen null — passt zu den ins Minus gedrückten Werten; ohne Extinktion bleibt Krisenangst im Bullenmarkt stehen | [Bennett et al. 2021](https://www.nature.com/articles/s41467-021-22592-4) |
+| 2–3 **Kompartimente** mit schneller und langsamer Lernrate | schnell: V-Crash-Erholung erkennen; langsam: „Aktien steigen langfristig" behalten | [Aso & Rubin 2016](https://elifesciences.org/articles/16135) |
+| Gelerntes nur **teilweise vererben** (0–50 %) | Lamarck-Vererbung ist in wechselnden Umwelten instabil — Kinder erben die Krisenangst | [Sasaki & Tokoro](https://direct.mit.edu/artl/article-abstract/5/3/203/2321/Evolving-Learnable-Neural-Networks-Under-Changing) |
+| **Altersschichten** (ALPS) statt globaler Top-10 % | verhindert, dass der Schwarm zu Kopien einer Linie schrumpft | [Hornby 2006](https://dl.acm.org/doi/10.1145/1143997.1144142) |
+| **PBO / Deflated Sharpe** vor jeder Auslese | misst, ob die Auslese überhaupt Können statt Glück findet | [Bailey et al.](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253) |
+| Schnelles + langsames Trendsignal für **Erholungsphasen** | gezielt gegen das V-Crash-Versagen 2020 | [Goulding, Harvey & Mazzoleni 2023](https://people.duke.edu/~charvey/Research/Published_Papers/P158_Momentum_turning_points.pdf) |
 
 ## Ergebnis v3 (2026-09-20) — neue Sinne helfen nicht, Zeitraum schlägt Sinne
 
@@ -208,6 +275,7 @@ python -m venv .venv
 .venv\Scripts\python -m fly evolve              # eine Zucht, Walk-forward-Ergebnis
 .venv\Scripts\python -m fly lab --seeds 1 2 3   # Zucht gegen beide Kontrollversuche
 .venv\Scripts\python -m fly evolve --friedhof   # + einmaliger Test auf 2025–heute
+.venv\Scripts\python -m fly colony --window 504 --exams 2   # Wochenzucht mit Kontrollen
 .venv\Scripts\python -m fly --senses v3 diagnose            # neue Sinne (Kredit/Breite/Flucht)
 .venv\Scripts\python -m fly --senses v3 --since 2007-04-11 lab --seeds 1 2 3   # fairer Vergleich zu v2
 ```
@@ -219,33 +287,32 @@ und v3-Sinnen auf demselben Zeitraum. Jede Zucht speichert in `results/` ihren V
 überlebenden Fliegen (`survivors.csv` mit Genen und Eltern) und den Schwarm samt
 Gedächtnis (`swarm.npz`, ladbar mit `Population.load`). Eine Zucht dauert ~20 s.
 
-## Täglich laufen lassen — kostenlos
+## Live-Betrieb — kostenlos auf GitHub
 
 ```bash
-python -m fly.daily --init results/<lauf>/swarm.npz   # einmalig: Schwarm einsetzen
-python -m fly.daily                                   # Kurse holen, weiterleben, abstimmen
+python -m fly.live init     # Kolonie gründen, von 1994 bis heute leben lassen (~2 min)
+python -m fly.live step     # täglich: Kurse holen, weiterleben, auslesen, abstimmen
 ```
 
-`.github/workflows/daily.yml` erledigt das werktags um 22:40 UTC per **GitHub Actions**
-(kostenlos: öffentliche Repos unbegrenzt, private 2.000 Minuten/Monat; ein Lauf dauert Sekunden).
-Der Lauf schreibt seinen Zustand ins Repo zurück:
+`.github/workflows/daily.yml` macht das werktags nach US-Börsenschluss per **GitHub Actions**
+(öffentliche Repos: unbegrenzt kostenlos, private: 2.000 min/Monat — ein Lauf braucht ~1 min).
+Der erste Lauf gründet die Kolonie selbst. Danach:
 
-| Datei | Inhalt |
+| Wo | Was |
 |---|---|
-| `swarm/current.npz` | Gedächtnis und Gene der 10 Schwarm-Fliegen |
-| `swarm/state.json` | bis zu welchem Handelstag sie gelebt haben |
-| `swarm/signals.csv` | jede Entscheidung mit Datum, Stimmen und Kurs |
+| Zweig `main`, `signals.csv` | jede Entscheidung mit Datum, Stimmen, Schlusskurs — vor dem nächsten Handelstag festgeschrieben |
+| Zweig `fly-state`, `state/colony.npz` | Gedächtnis, Gene und Bilanz aller 50 Fliegen (~1,5 MB), bei jedem Lauf ersetzt statt angehängt |
 
-Das Signal steht damit **vor** dem nächsten Handelstag im Git-Verlauf und ist
-nachträglich nicht mehr schönzurechnen — das billigste ehrliche Paper-Trading, das es gibt.
+- **Die wöchentliche Auslese** (10 % Tod, 10 % Klone) passiert automatisch im ersten Lauf nach einem Wochenwechsel.
+- **Backtest = Live, bitgenau:** Tag-für-Tag-Betrieb mit Speichern/Laden ergibt exakt dasselbe wie der Backtest am Stück (Test `test_colony_same_result_in_one_go_or_day_by_day`). Der gespeicherte Zustand lebt nur bis zum vorletzten Tag, weil die Rendite des jüngsten Tages erst morgen feststeht; das Signal kommt aus einer Wegwerf-Kopie.
+- **GitHub-Cron ist unzuverlässig** (Verspätungen um Stunden möglich) — daher zwei Termine (21:17 und 23:47 UTC); ein doppelter Lauf ändert nichts.
+- **Papier-Handel (optional):** Kostenloses Paper-Konto bei [Alpaca](https://alpaca.markets) (100.000 $ Spielgeld, auch aus Deutschland), dann im Repo unter *Settings → Secrets → Actions* `ALPACA_KEY_ID` und `ALPACA_SECRET_KEY` anlegen. Der Lauf gleicht die Papier-Position ans Signal an; Orders werden zur nächsten Eröffnung ausgeführt. `fly/broker.py` ist fest auf die Papier-Adresse verdrahtet — **mit echtem Geld handelt dieser Code nicht.**
 
-**Hier wird nichts gehandelt.** Der Lauf schreibt nur auf, was der Schwarm täte. Echtes
-Geld kommt frühestens in Frage, wenn eine Version den Walk-forward UND den Friedhof
-besteht — und dann über ein Broker-Paper-Konto (z. B. Alpaca, gratis) als Zwischenschritt.
+### „24/7" — was geht und was nicht
 
-Alternativen zum Hosten: Oracle Cloud "Always Free" (echter Dauerserver, mehr Einrichtung),
-Railway ab 5 €/Monat. PythonAnywhere scheidet aus — die Gratis-Version lässt keine
-Yahoo-Abfragen zu.
+- **SPY handelt nicht 24/7**, höchstens 24/5 (Alpaca-Overnight-Session über Blue Ocean, nur Limit-Orders). Die Fliege entscheidet ohnehin einmal täglich auf Schlusskursen — ein Dauerserver bringt ihr nichts.
+- **Kein kostenloser Dauerserver ohne Haken** (Stand 09/2026): Oracle Always Free wurde auf 2 OCPU/12 GB halbiert und holt untätige VMs zurück; Google e2-micro ist frei, braucht aber eine Kreditkarte; Render/Fly.io/Railway haben keine dauerhaft freien Hintergrundprozesse. GitHub Actions ist für einen Tageslauf die beste freie Lösung.
+- **Echtes Geld:** erst, wenn das Papierkonto über Monate überzeugt — und dann als bewusste eigene Entscheidung, nicht per Umschalter.
 
 ## Projektaufbau
 
@@ -257,5 +324,8 @@ fly/dopamine.py    Belohnungssystem
 fly/population.py  lernende Ausgangsschicht, Leben, Schwarm-Abstimmung
 fly/evolution.py   Gene, Kreuzung, Mutation, Auslese
 fly/report.py      Kennzahlen
-fly/daily.py       Tagessignal für den Cron-Lauf
+fly/colony.py      Wochenzucht: 10 % Tod, 10 % Klone, Prüfungen, Schwarm
+fly/live.py        Live-Betrieb (täglich weiterleben, Signal)
+fly/broker.py      Alpaca-Papierkonto angleichen (nur Papiergeld)
+fly/overlay.py     bedingtes Volatility-Targeting (getestet, nicht aktiv)
 ```
