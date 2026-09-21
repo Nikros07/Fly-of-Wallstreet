@@ -24,7 +24,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from fly.population import Population, World, live, pnl, vote
+from fly.population import (Population, World, live, live_multi, pnl, pnl_multi,
+                            shared_days, vote, vote_multi)
 
 # Name: (untere Grenze, obere Grenze, logarithmisch?, Startbereich)
 GENES: dict[str, tuple[float, float, bool, tuple[float, float]]] = {
@@ -214,5 +215,84 @@ def evolve(world: World, cfg: Config, n_kc: int, max_generations: int | None = N
         generations=pd.DataFrame(rows),
         walk_forward=pd.Series(np.concatenate(wf_pnl), index=days, name="swarm"),
         walk_forward_positions=pd.Series(np.concatenate(wf_pos), index=days, name="position"),
+        config=cfg,
+    )
+
+
+def evolve_multi(worlds: list[World], cfg: Config, n_kc: int, max_generations: int | None = None,
+                 progress=None, names: list[str] | None = None) -> Result:
+    """
+    Wie `evolve()`, aber dieselbe Fliege lebt gleichzeitig in mehreren Märkten
+    (ein Gehirn, ein Gedächtnis, geteilter Schädel — pro Handelstag ein
+    Lernschritt je Markt). Fitness, Auslese, Kreuzung und Walk-forward sind
+    unverändert; nur "Leben" und "Prüfung" laufen über `live_multi`/`pnl_multi`
+    auf dem Portfolio-Ergebnis (Mittelwert der Einzelmärkte).
+    """
+    days = shared_days(worlds)
+    rng = np.random.default_rng(cfg.seed)
+    learn_worlds = ([w.with_shuffled_learning(rng) for w in worlds]
+                    if cfg.control == "shuffled-dopamine" else worlds)
+
+    pop = hatch(cfg.population, n_kc, rng)
+    next_id = cfg.population
+    quarters = worlds[0].quarters()
+    if max_generations:
+        quarters = quarters[:max_generations]
+
+    rows, wf_pnl, wf_pos, wf_days = [], [], [], []
+    for g, (t0, t1) in enumerate(quarters):
+        positions = live_multi(pop, learn_worlds, t0, t1, learn=True)   # (W, P, n)
+        daily = [pnl_multi(positions, worlds, t0, t1)]
+        bench = [np.mean([np.nan_to_num(w.ret1[t0:t1]) for w in worlds], axis=0)]
+
+        # Walk-forward: wie evolve(), aber je Markt eine eigene Schwarmstimme;
+        # das Portfolio-Ergebnis ist wieder der Mittelwert der Einzelmärkte.
+        swarm_pos = vote_multi(positions[:, :cfg.survivors], cfg.quorum) if g > 0 else \
+            np.zeros((len(worlds), t1 - t0), dtype=np.int8)
+        wf_pos.append(swarm_pos)
+        wf_pnl.append(pnl_multi(swarm_pos[:, None, :], worlds, t0, t1)[0])
+        wf_days.append(days[t0:t1])
+
+        if g > 0:
+            for e in rng.choice(g, size=min(cfg.exams, g), replace=False):
+                e0, e1 = quarters[e]
+                exam_pos = live_multi(pop, worlds, e0, e1, learn=False)
+                daily.append(pnl_multi(exam_pos, worlds, e0, e1))
+                bench.append(np.mean([np.nan_to_num(w.ret1[e0:e1]) for w in worlds], axis=0))
+        fitness = score(daily, bench, cfg.fitness)
+
+        if cfg.control == "random-selection":
+            order = rng.permutation(pop.size)
+        else:
+            order = np.argsort(-fitness, kind="stable")
+        keep = order[:cfg.survivors]
+
+        rows.append({
+            "generation": g,
+            "quarter": str(days[t0].to_period("Q")),
+            "best_fitness": float(fitness.max()),
+            "median_fitness": float(np.median(fitness)),
+            "survivor_fitness": float(fitness[keep].mean()),
+            "exposure": float((positions[:, keep] != 0).mean()),
+            "short_share": float((positions[:, keep] == -1).mean()),
+            "swarm_exposure": float((swarm_pos != 0).mean()),
+            **{f"gene_{k}": float(np.median(v[keep])) for k, v in pop.genes.items()},
+        })
+        if progress:
+            progress(rows[-1])
+
+        survivors = pop.take(keep)
+        kids = breed(survivors, cfg.population - cfg.survivors, rng, next_id)
+        next_id += kids.size
+        pop = Population.concat(survivors, kids)
+
+    wf_days_idx = pd.DatetimeIndex(np.concatenate(wf_days))
+    cols = names or [f"markt{i}" for i in range(len(worlds))]
+    positions_df = pd.DataFrame(np.concatenate(wf_pos, axis=1).T, index=wf_days_idx, columns=cols)
+    return Result(
+        survivors=pop.take(np.arange(cfg.survivors)),
+        generations=pd.DataFrame(rows),
+        walk_forward=pd.Series(np.concatenate(wf_pnl), index=wf_days_idx, name="swarm"),
+        walk_forward_positions=positions_df,
         config=cfg,
     )

@@ -192,6 +192,70 @@ def _learn(pop: Population, world: World, t: int, t0: int, positions: np.ndarray
     pop.nogo += f * (1.0 - pop.nogo)
 
 
+def shared_days(worlds: list[World]) -> pd.DatetimeIndex:
+    """Prüft, dass alle Märkte exakt dieselben Handelstage haben, und gibt sie zurück.
+
+    Das ist die Voraussetzung für `live_multi`: Tagesindex t muss über alle
+    Märkte hinweg dasselbe Kalenderdatum meinen, sonst würde ein Lernschritt
+    in Markt A auf ein Ergebnis zugreifen, das an diesem Kalendertag in
+    Markt B noch gar nicht feststeht.
+    """
+    days = worlds[0].days
+    for w in worlds[1:]:
+        if not w.days.equals(days):
+            raise ValueError("Märkte haben unterschiedliche Handelstage — Zeitdisziplin verletzt")
+    return days
+
+
+def live_multi(pop: Population, worlds: list[World], t0: int, t1: int, learn: bool = True,
+               values_out: np.ndarray | None = None) -> np.ndarray:
+    """
+    Wie `live()`, aber dieselbe Fliege riecht an jedem Tag ALLE Märkte
+    (ein Gehirn, ein Gedächtnis, geteilter Schädel). Rückgabe: Positionen
+    (W, P, n) mit +1 Long, 0 NO TRADE, -1 Short je Markt.
+
+    Zeitdisziplin, zweifach: (1) Die äußere Schleife läuft über die TAGE, die
+    innere über die Märkte — ein Handelstag ist für alle neun Märkte
+    abgeschlossen, bevor der nächste Tag beginnt. Liefe stattdessen die
+    äußere Schleife über die Märkte, würde die Fliege beim ersten Tag von
+    Markt 9 bereits aus dem gesamten Quartal von Markt 1 gelernt haben — ein
+    Blick in die Zukunft über den Umweg eines anderen Instruments.
+    (2) INNERHALB eines Tages entscheiden ERST alle neun Märkte — mit
+    derselben Gedächtnis-Momentaufnahme vom Vortag —, und erst DANACH lernt
+    jeder Markt aus seinem fälligen Ergebnis. Alle neun Börsen schließen
+    gleichzeitig; entschiede und lernte Markt 1 sofort, bevor Markt 2 an der
+    Reihe ist, wüsste Markt 2 noch am selben Tag schon, was Markt 1 gerade
+    gelernt hat — ein Vorteil, den es in Wirklichkeit nicht gäbe.
+    """
+    P, n = pop.size, t1 - t0
+    positions = np.zeros((len(worlds), P, n), dtype=np.int8)
+    for t in range(t0, t1):
+        for wi, world in enumerate(worlds):
+            if values_out is not None:
+                values_out[wi, :, t - t0] = pop.values(world.kc[t])
+            positions[wi, :, t - t0] = pop.decide(world.kc[t])
+        if learn:
+            for wi, world in enumerate(worlds):
+                _learn(pop, world, t, t0, positions[wi])
+    return positions
+
+
+def pnl_multi(positions: np.ndarray, worlds: list[World], t0: int, t1: int) -> np.ndarray:
+    """
+    Portfolio-Tagesergebnis je Fliege: der Mittelwert der neun Einzelmarkt-
+    Ergebnisse (Form (P, n)) — jeder Markt trägt also höchstens 1/9 des
+    Kapitals, Kosten und Leihgebühr wirken wie bisher pro Markt.
+    """
+    per_market = np.stack([pnl(positions[wi], world, t0, t1)
+                           for wi, world in enumerate(worlds)])
+    return per_market.mean(axis=0)
+
+
+def vote_multi(positions: np.ndarray, quorum: int) -> np.ndarray:
+    """Schwarm-Abstimmung je Markt, Form (W, n) — jeder Markt entscheidet für sich."""
+    return np.stack([vote(positions[wi], quorum) for wi in range(positions.shape[0])])
+
+
 def pnl(positions: np.ndarray, world: World, t0: int, t1: int) -> np.ndarray:
     """Tagesergebnis je Fliege nach Kosten, Form (P, n). Start aus NO TRADE."""
     ret = np.nan_to_num(world.ret1[t0:t1])

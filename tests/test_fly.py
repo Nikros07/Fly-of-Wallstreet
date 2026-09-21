@@ -15,7 +15,8 @@ import pytest
 from fly.data import Market
 from fly.dopamine import dopamine
 from fly.evolution import GENES, breed, hatch, mutate
-from fly.population import LONG, SHORT, MAX_HORIZON, World, live, sharpe, vote
+from fly.population import (LONG, SHORT, MAX_HORIZON, World, live, live_multi, pnl,
+                            pnl_multi, shared_days, sharpe, vote)
 from fly.senses import channels
 from fly.skull import Skull
 
@@ -82,6 +83,83 @@ def test_decisions_do_not_depend_on_later_outcomes():
     pb = live(b, forged, 0, T)
     np.testing.assert_array_equal(pa[:, :k + 1], pb[:, :k + 1])
     assert (pa != 0).any(), "Test ist nur aussagekräftig, wenn überhaupt gehandelt wird"
+
+
+# ─── Mehrmarkt ───────────────────────────────────────────────────────────────
+
+def test_multi_market_decisions_do_not_depend_on_later_outcomes_in_any_market():
+    """
+    Wie test_decisions_do_not_depend_on_later_outcomes, aber über mehrere Märkte
+    gleichzeitig: Fälscht man ALLES nach Tag k in JEDEM der Märkte, bleiben die
+    Entscheidungen bis k in ALLEN Märkten gleich. Das sichert genau die
+    Zeitdisziplin, um die es bei mehreren Märkten geht: Tag t muss für Markt 9
+    abgeschlossen sein, bevor Markt 1 den nächsten Tag beginnt — sonst könnte
+    ein Muster aus Markt 1 am selben Kalendertag schon "wissen", was in Markt 9
+    erst später passiert.
+    """
+    worlds = [fake_world(seed=s) for s in range(3)]
+    T = len(worlds[0].days)
+    rng = np.random.default_rng(3)
+    a = hatch(20, 300, np.random.default_rng(1))
+    b = hatch(20, 300, np.random.default_rng(1))
+    a.genes["lr"][:] = b.genes["lr"][:] = 0.3
+    k = 120
+
+    def forge(world):
+        fwd = world.fwd.copy()
+        for h in range(MAX_HORIZON + 1):
+            late = np.arange(T) + h > k
+            fwd[late, h] = rng.normal(0, 0.05, late.sum())
+        ret1 = world.ret1.copy()
+        ret1[k:] = rng.normal(0, 0.05, T - k)
+        return World(world.days, world.kc, ret1, fwd, world.vol)
+
+    forged = [forge(w) for w in worlds]
+
+    pa = live_multi(a, worlds, 0, T)
+    pb = live_multi(b, forged, 0, T)
+    np.testing.assert_array_equal(pa[:, :, :k + 1], pb[:, :, :k + 1])
+    assert (pa != 0).any(), "Test ist nur aussagekräftig, wenn überhaupt gehandelt wird"
+
+
+def test_market_order_within_a_day_does_not_matter():
+    """
+    Alle neun Börsen schließen gleichzeitig: Entscheidung und Lernergebnis für
+    einen Markt dürfen nicht davon abhängen, an welcher Stelle er in der Liste
+    steht — sonst hätte ein Markt, der zuerst drankommt, am selben Tag schon
+    einen Wissensvorsprung vor einem, der später drankommt (er wüsste, was die
+    Fliege durch den ersten Markt heute bereits gelernt hat).
+    """
+    worlds = [fake_world(seed=s) for s in range(3)]
+    T = len(worlds[0].days)
+    pop_a = hatch(10, 300, np.random.default_rng(2))
+    pop_b = hatch(10, 300, np.random.default_rng(2))
+    pop_a.genes["lr"][:] = pop_b.genes["lr"][:] = 0.3
+
+    pos_forward = live_multi(pop_a, worlds, 0, T)
+    pos_reversed = live_multi(pop_b, worlds[::-1], 0, T)
+
+    np.testing.assert_array_equal(pos_forward[0], pos_reversed[-1])
+    np.testing.assert_array_equal(pos_forward[-1], pos_reversed[0])
+    assert (pos_forward != 0).any(), "Test ist nur aussagekräftig, wenn überhaupt gehandelt wird"
+
+
+def test_portfolio_pnl_is_the_mean_of_the_single_market_results():
+    """Das Portfolio ist der Mittelwert der Einzelmarkt-Ergebnisse — jeder Markt
+    trägt also höchstens 1/W des Kapitals."""
+    worlds = [fake_world(seed=s) for s in range(3)]
+    pop = hatch(5, 300, np.random.default_rng(0))
+    positions = live_multi(pop, worlds, 0, 50, learn=False)
+    result = pnl_multi(positions, worlds, 0, 50)
+    manual = np.mean([pnl(positions[i], w, 0, 50) for i, w in enumerate(worlds)], axis=0)
+    np.testing.assert_array_equal(result, manual)
+
+
+def test_shared_days_rejects_mismatched_calendars():
+    a = fake_world(T=200, seed=0)
+    b = fake_world(T=150, seed=0)
+    with pytest.raises(ValueError):
+        shared_days([a, b])
 
 
 # ─── Schädel ─────────────────────────────────────────────────────────────────
