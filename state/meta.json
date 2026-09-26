@@ -1,0 +1,15 @@
+{
+  "last_day": "2026-09-24",
+  "config": {
+    "population": 50,
+    "turnover": 0.1,
+    "window": 504,
+    "min_days": 20,
+    "swarm": 10,
+    "quorum": 6,
+    "control": "none",
+    "exams": 2,
+    "exam_len": 63,
+    "seed": 1
+  }
+}
